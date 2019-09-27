@@ -62,7 +62,7 @@ class _PointnetSAModuleBase(nn.Module):
 
             new_features = self.mlps[i](new_features)  # (B, mlp[-1], npoint, nsample)
             new_features = F.max_pool2d(
-                new_features, kernel_size=[1, new_features.size(3)]
+                new_features, kernel_size=[1, new_features.size(3)] # along nsample dim to down sampling
             )  # (B, mlp[-1], npoint, 1)
             new_features = new_features.squeeze(-1)  # (B, mlp[-1], npoint)
 
@@ -206,16 +206,129 @@ class PointnetFPModule(nn.Module):
         return new_features.squeeze(-1)
 
 
+class VoteSAModule(PointnetSAModule):
+    r"""Pointnet vote set abstrction layer
+
+    Parameters
+    ----------
+    npoint : int
+        Number of features
+    radius : float
+        Radius of ball
+    nsample : int
+        Number of samples in the ball query
+    mlp : list
+        Spec of the pointnet before the global max_pool
+    bn : bool
+        Use batchnorm
+    """
+
+    def __init__(
+        self, mlp, npoint=None, radius=None, nsample=None, bn=True, use_xyz=True
+    ):
+        # type: (PointnetSAModule, List[int], int, float, int, bool, bool) -> None
+        super(PointnetSAModule, self).__init__(
+            mlps=[mlp],
+            npoint=npoint,
+            radii=[radius],
+            nsamples=[nsample],
+            bn=bn,
+            use_xyz=use_xyz,
+        )
+        self.vote_mlp = pt_utils.Conv1d(in_size=3+mlp[0],out_size=4)
+
+
+    def forward(self, xyz, features=None):
+        # type: (_PointnetSAModuleBase, torch.Tensor, torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]
+        r"""
+        Parameters
+        ----------
+        xyz : torch.Tensor
+            (B, N, 3) tensor of the xyz coordinates of the features
+        features : torch.Tensor
+            (B, N, C) tensor of the descriptors of the the features
+
+        Returns
+        -------
+        new_xyz : torch.Tensor
+            (B, npoint, 3) tensor of the new features' xyz
+        new_features : torch.Tensor
+            (B,  \sum_k(mlps[k][-1]), npoint) tensor of the new_features descriptors
+        """
+
+        new_features_list = []
+
+        if not features == None:
+            xyz_feat = torch.cat((xyz,features), dim=2) # (B,N,3+C)
+        vote_results = self.vote_mlp(xyz_feat) #(B,N,1+3), confidence + refine_x,refine_y,refine_z
+        conf, refine = vote_results[:,:,0],vote_results[:,:,1:] #(B,N) and (B,N,3)
+        _, ind = torch.topk(conf,npoints,dim=1)
+        new_xyz = torch.gather(xyz, 1, ind) #(B,npoints)
+        new_xyz_refine = torch.gather(refine, 1, ind) #(B,npoints)
+        new_xyz += new_xyz_refine
+
+        # xyz_flipped = xyz.transpose(1, 2).contiguous() #(B,3,N)
+        # new_xyz = (
+        #     pointnet2_utils.gather_operation(
+        #         xyz_flipped, pointnet2_utils.furthest_point_sample(xyz, self.npoint) # origin SA FPS sampling
+        #     )
+        #     .transpose(1, 2) # back to (B,N,3)
+        #     .contiguous()
+        #     if self.npoint is not None
+        #     else None
+        # )
+
+        for i in range(len(self.groupers)):
+            new_features = self.groupers[i](
+                xyz, new_xyz, features
+            )  # (B, C, npoint, nsample)
+
+            new_features = self.mlps[i](new_features)  # (B, mlp[-1], npoint, nsample)
+            new_features = F.max_pool2d(
+                new_features, kernel_size=[1, new_features.size(3)]
+            )  # (B, mlp[-1], npoint, 1)
+            new_features = new_features.squeeze(-1)  # (B, mlp[-1], npoint)
+
+            new_features_list.append(new_features)
+
+        return new_xyz, torch.cat(new_features_list, dim=1)
+
+
 if __name__ == "__main__":
+    # from torch.autograd import Variable
+
+    # torch.manual_seed(1)
+    # torch.cuda.manual_seed_all(1)
+    # xyz = Variable(torch.randn(2, 9, 3).cuda(), requires_grad=True)
+    # xyz_feats = Variable(torch.randn(2, 9, 6).cuda(), requires_grad=True)
+
+    # test_module = PointnetSAModuleMSG(
+    #     npoint=2, radii=[5.0, 10.0], nsamples=[6, 3], mlps=[[9, 3], [9, 6]]
+    # )
+    # test_module.cuda()
+    # print(test_module(xyz, xyz_feats))
+
+    # #  test_module = PointnetFPModule(mlp=[6, 6])
+    # #  test_module.cuda()
+    # #  from torch.autograd import gradcheck
+    # #  inputs = (xyz, xyz, None, xyz_feats)
+    # #  test = gradcheck(test_module, inputs, eps=1e-6, atol=1e-4)
+    # #  print(test)
+
+    # for _ in range(1):
+    #     _, new_features = test_module(xyz, xyz_feats)
+    #     new_features.backward(torch.cuda.FloatTensor(*new_features.size()).fill_(1))
+    #     print(new_features)
+    #     print(xyz.grad)
     from torch.autograd import Variable
 
     torch.manual_seed(1)
     torch.cuda.manual_seed_all(1)
-    xyz = Variable(torch.randn(2, 9, 3).cuda(), requires_grad=True)
-    xyz_feats = Variable(torch.randn(2, 9, 6).cuda(), requires_grad=True)
+    xyz = Variable(torch.randn(2, 9, 3), requires_grad=True)
+    xyz_feats = Variable(torch.randn(2, 9, 6), requires_grad=True)
 
-    test_module = PointnetSAModuleMSG(
-        npoint=2, radii=[5.0, 10.0], nsamples=[6, 3], mlps=[[9, 3], [9, 6]]
+    test_module = VoteSAModule(
+        npoint=2, radii=[5.0, 10.0], nsamples=[6, 3], mlps=[9, 3]#, [9, 6]]
     )
     test_module.cuda()
     print(test_module(xyz, xyz_feats))
@@ -232,3 +345,4 @@ if __name__ == "__main__":
         new_features.backward(torch.cuda.FloatTensor(*new_features.size()).fill_(1))
         print(new_features)
         print(xyz.grad)
+    
