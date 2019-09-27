@@ -5,6 +5,8 @@ from __future__ import (
     print_function,
     unicode_literals,
 )
+import sys
+sys.path.append('/home/svcl/work/Pointnet2_PyTorch')
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -235,7 +237,7 @@ class VoteSAModule(PointnetSAModule):
             bn=bn,
             use_xyz=use_xyz,
         )
-        self.vote_mlp = pt_utils.Conv1d(in_size=3+mlp[0],out_size=4)
+        self.vote_mlp = pt_utils.Conv1d(in_size=mlp[0]-3,out_size=4)
 
 
     def forward(self, xyz, features=None):
@@ -257,26 +259,27 @@ class VoteSAModule(PointnetSAModule):
         """
 
         new_features_list = []
-
-        if not features == None:
-            xyz_feat = torch.cat((xyz,features), dim=2) # (B,N,3+C)
-        vote_results = self.vote_mlp(xyz_feat) #(B,N,1+3), confidence + refine_x,refine_y,refine_z
+        if not features is None :
+            xyz_feat = torch.cat((xyz,features), dim=2).transpose(1,2).contiguous() # (B,3+C,N)
+        else:
+            xyz_feat = xyz.transpose(1,2).contiguous()
+        vote_results = self.vote_mlp(xyz_feat).transpose(1,2).contiguous() #(B,N,1+3), confidence + refine_x,refine_y,refine_z
         conf, refine = vote_results[:,:,0],vote_results[:,:,1:] #(B,N) and (B,N,3)
-        _, ind = torch.topk(conf,npoints,dim=1)
-        new_xyz = torch.gather(xyz, 1, ind) #(B,npoints)
-        new_xyz_refine = torch.gather(refine, 1, ind) #(B,npoints)
+        _, ind = torch.topk(conf, self.npoint, dim=1) #(B,npoints)
+        new_xyz = torch.gather(xyz, 1, ind.unsqueeze(2).repeat(1,1,3)) #(B,npoints,3)
+        new_xyz_refine = torch.gather(refine, 1, ind.unsqueeze(2).repeat(1,1,3)) #(B,npoints,3)
         new_xyz += new_xyz_refine
-
-        # xyz_flipped = xyz.transpose(1, 2).contiguous() #(B,3,N)
-        # new_xyz = (
-        #     pointnet2_utils.gather_operation(
-        #         xyz_flipped, pointnet2_utils.furthest_point_sample(xyz, self.npoint) # origin SA FPS sampling
-        #     )
-        #     .transpose(1, 2) # back to (B,N,3)
-        #     .contiguous()
-        #     if self.npoint is not None
-        #     else None
-        # )
+        #xyz_flipped = xyz.transpose(1, 2).contiguous() #(B,3,N)
+        #new_xyz = (
+        #    pointnet2_utils.gather_operation(
+        #        xyz_flipped, pointnet2_utils.furthest_point_sample(xyz, self.npoint) # origin SA FPS sampling
+        #    )
+        #    .transpose(1, 2) # back to (B,N,3)
+        #    .contiguous()
+        #    if self.npoint is not None
+        #    else None
+        #)
+        print(new_xyz.size())
 
         for i in range(len(self.groupers)):
             new_features = self.groupers[i](
@@ -324,11 +327,11 @@ if __name__ == "__main__":
 
     torch.manual_seed(1)
     torch.cuda.manual_seed_all(1)
-    xyz = Variable(torch.randn(2, 9, 3), requires_grad=True)
-    xyz_feats = Variable(torch.randn(2, 9, 6), requires_grad=True)
+    xyz = Variable(torch.randn(2, 9, 3).cuda(), requires_grad=True)
+    xyz_feats = Variable(torch.randn(2, 9, 6).cuda(), requires_grad=True)
 
     test_module = VoteSAModule(
-        npoint=2, radii=[5.0, 10.0], nsamples=[6, 3], mlps=[9, 3]#, [9, 6]]
+        npoint=2, radius=5.0, nsample=6, mlp=[9,6]#, [9, 6]]
     )
     test_module.cuda()
     print(test_module(xyz, xyz_feats))
