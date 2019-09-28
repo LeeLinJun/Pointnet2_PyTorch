@@ -14,7 +14,8 @@ import pprint
 import os.path as osp
 import os
 import argparse
-
+from pointnet2.models import Pointnet2SemSSG_Vote as Pointnet
+#from pointnet2.models import Pointnet2SemMSG as Pointnet
 from pointnet2.models import Pointnet2SemMSG as Pointnet
 from pointnet2.models.pointnet2_msg_sem import model_fn_decorator
 from pointnet2.data import Indoor3DSemSeg
